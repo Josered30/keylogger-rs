@@ -1,0 +1,29 @@
+[package]
+name = "keylogger-rs"
+version = "0.1.0"
+authors = ["Jose Aparcana <josered30@hotmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+chrono = "0.4.6"
+os_info = "*"
+hostname = "0.1.4"
+reqwest = { version = "0.10", features=  ["json"] }
+tokio = { version = "0.2", features = ["full"] }
+serde = "1.0.114"
+serde_json = "1.0"
+uuid = { version = "0.6.5", features = ["serde", "v4"] }
+
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["winuser", "winnt", "processthreadsapi", "psapi", "winnls"] }
+
+[profile.release]
+lto = true
+opt-level = 'z'
+overflow-checks = false
+debug = false
+panic = "abort"
+
